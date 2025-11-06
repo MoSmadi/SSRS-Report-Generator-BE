@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+jinja2
+requests
+requests-ntlm
+pyodbc
+zeep
+python-dotenv
+pytest
+httpx
+pytest-asyncio
+structlog
