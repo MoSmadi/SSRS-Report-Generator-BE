@@ -1,7 +1,7 @@
 """Lightweight SSRS REST API helpers."""
 from __future__ import annotations
 
-from urllib.parse import quote
+from typing import Any, Dict, Optional
 
 import requests
 
@@ -13,7 +13,7 @@ def _base_url() -> str:
     return f"{base}/reports/api/v2.0"
 
 
-def get_system_info() -> dict | None:
+def get_system_info() -> Optional[Dict[str, Any]]:
     try:
         resp = requests.get(f"{_base_url()}/SystemInfo", timeout=10)
         if resp.ok:

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from urllib.parse import urlencode, quote
+from typing import Dict, Optional
 
 from .config import get_settings
 
 
-def make_render_url(item_path: str, default_params: dict[str, str] | None = None) -> str:
+def make_render_url(item_path: str, default_params: Optional[Dict[str, str]] = None) -> str:
     settings = get_settings()
     base = settings.render_base.rstrip("/")
     path = item_path if item_path.startswith("/") else f"/{item_path}"

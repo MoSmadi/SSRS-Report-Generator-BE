@@ -2,14 +2,17 @@ import os
 
 from app import config
 
-os.environ.setdefault("API_KEY", "test-key")
 os.environ.setdefault("SQLSERVER_CONN_STR", "")
+os.environ.setdefault("SQLSERVER_HOST", "")
+os.environ.setdefault("SQLSERVER_DATABASE", "")
+os.environ.setdefault("SQLSERVER_USER", "")
+os.environ.setdefault("SQLSERVER_PASSWORD", "")
 config.get_settings.cache_clear()
 
 from app.main import app  # noqa: E402
 
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 
 
 @pytest.mark.asyncio
@@ -52,12 +55,9 @@ async def test_generate_sql_contract(monkeypatch):
         },
     }
 
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.post(
-            "/report/generateSQL",
-            json=payload,
-            headers={"X-API-Key": os.environ["API_KEY"]},
-        )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/report/generateSQL", json=payload)
     assert response.status_code == 200
     data = response.json()
     assert "SELECT" in data["sql"]
@@ -135,12 +135,9 @@ async def test_publish_report_contract(monkeypatch):
         },
     }
 
-    async with AsyncClient(app=app, base_url="http://test") as client:
-        response = await client.post(
-            "/report/publishReport",
-            json=payload,
-            headers={"X-API-Key": os.environ["API_KEY"]},
-        )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/report/publishReport", json=payload)
 
     assert response.status_code == 200
     data = response.json()

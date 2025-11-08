@@ -2,18 +2,18 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
-from typing import Any
+from typing import Any, Dict, List, Optional
 
-try:  # pragma: no cover - optional dependency
-    import pyodbc
-except ImportError:  # pragma: no cover
-    pyodbc = None
+from fastapi import APIRouter, HTTPException
+from fastapi.encoders import jsonable_encoder
 
-from fastapi import APIRouter, Depends
-
-from .. import catalog, intent, sqlgen
+from .. import catalog, sqlgen
 from ..config import get_settings
+from ..intent import parse_intent, spec_to_payload
+from ..mapping import compute_schema_insights, map_terms
+from ..db import open_sql_connection, sql_connection_available
 from ..models import ServiceError
 from ..rdl import build_rdl
 from ..schemas import (
@@ -32,39 +32,98 @@ from ..schemas import (
 from ..smoketest import make_render_url
 from ..ssrs_rest import get_system_info, set_report_datasources
 from ..ssrs_soap import set_shared_datasource, upload_rdl
-from ..utils.security import require_api_key
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-router = APIRouter(prefix="/report", tags=["reports"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/report", tags=["reports"])
 
 
 @router.get("/customerDatabases")
-def list_databases() -> dict[str, list[dict[str, str]]]:
+def list_databases() -> Dict[str, List[Dict[str, str]]]:
+    _log_api_event("customerDatabases.request", None)
     try:
         databases = catalog.list_databases()
     except Exception as exc:  # pragma: no cover - requires DB
         logger.exception("failed to list databases")
-        raise ServiceError("Unable to list databases", "catalog_error", status_code=502) from exc
-    return {"databases": databases}
+        detail = _summarize_error(exc)
+        message = "Unable to list databases"
+        if detail:
+            message = f"{message}: {detail}"
+        raise ServiceError(message, "catalog_error", status_code=502) from exc
+    response = {"databases": databases}
+    _log_api_event("customerDatabases.response", response)
+    return response
 
 
 @router.post("/inferFromNaturalLanguage", response_model=InferOut)
-def infer_from_nl(payload: InferIn) -> InferOut:
-    return intent.infer_from_nl(payload.db, payload.title, payload.text)
+def infer_from_nl(payload: Dict[str, Any]) -> Dict[str, Any]:
+    db = payload.get("db") or payload.get("databaseName")
+    text = payload.get("text") or payload.get("request")
+    title = payload.get("title") or ""
+    if not db or not text:
+        raise HTTPException(status_code=400, detail="db and text are required")
+
+    spec_model = parse_intent(text, title)
+    spec_payload = spec_to_payload(spec_model)
+
+    try:
+        columns = catalog.list_columns(db)
+    except Exception as exc:  # pragma: no cover - DB failure path
+        logger.warning("Failed to load columns for %s: %s", db, exc)
+        columns = catalog.demo_columns()
+
+    suggested = map_terms(spec_model, columns)
+    insights = compute_schema_insights(spec_model, suggested, columns)
+
+    response = {
+        "spec": spec_payload,
+        "suggestedMapping": [item.model_dump(exclude_none=True) for item in suggested],
+        "availableColumns": [col.model_dump(exclude_none=True) for col in columns],
+        "schemaInsights": insights.model_dump(),
+    }
+    _log_api_event("inferFromNaturalLanguage.response", response)
+    logger.info(
+        "infer.intent",
+        extra={"db": db, "title": spec_model.title, "coveragePercent": insights.coveragePercent},
+    )
+    logger.debug("infer.mapping", extra={"mappings": response["suggestedMapping"]})
+    return response
 
 
 @router.post("/generateSQL", response_model=GenSQLOut)
 def generate_sql(payload: GenSQLIn) -> GenSQLOut:
-    sql_text, params = sqlgen.build_sql(payload.spec, payload.mapping)
+    _log_api_event("generateSQL.request", payload)
+    mapping_payload = [m.model_dump() for m in payload.mapping]
+    logger.debug(
+        "generateSQL.payload",
+        extra={
+            "db": payload.db,
+            "spec": payload.spec,
+            "mapping": mapping_payload,
+        },
+    )
+
+    valid_mapping = [m for m in payload.mapping if m.column]
+    if not valid_mapping:
+        raise ServiceError("At least one mapped column is required", "invalid_mapping", status_code=400)
+
+    sql_text, params = sqlgen.build_sql(payload.spec, valid_mapping)
+    logger.debug("generateSQL.sql", extra={"sql": sql_text, "db": payload.db})
     try:
         columns_meta = catalog.validate_shape(sql_text)
     except Exception as exc:  # pragma: no cover - DB only
-        logger.exception("failed to validate SQL shape")
-        raise ServiceError("Unable to validate SQL output", "catalog_error", status_code=502) from exc
+        logger.exception(
+            "failed to validate SQL shape",
+            extra={"sql": sql_text, "db": payload.db, "spec": payload.spec, "mapping": mapping_payload},
+        )
+        detail = _summarize_error(exc)
+        message = "Unable to validate SQL output"
+        if detail:
+            message = f"{message}: {detail}"
+        raise ServiceError(message, "catalog_error", status_code=502) from exc
 
-    column_defs: list[ColumnDef] = []
+    column_defs: List[ColumnDef] = []
     for meta in columns_meta:
         samples = None
         with contextlib.suppress(Exception):
@@ -90,19 +149,24 @@ def generate_sql(payload: GenSQLIn) -> GenSQLOut:
             )
         )
 
-    return GenSQLOut(sql=sql_text, params=params, columns=column_defs)
+    response = GenSQLOut(sql=sql_text, params=params, columns=column_defs)
+    _log_api_event("generateSQL.response", response)
+    return response
 
 
 @router.post("/preview", response_model=PreviewOut)
 def preview(payload: PreviewIn) -> PreviewOut:
+    _log_api_event("preview.request", payload)
     limit = max(1, min(payload.limit, 200))
-    rows: list[dict[str, Any]]
-    if pyodbc is None or not settings.sql_conn_str:
+    rows: List[Dict[str, Any]]
+    if not sql_connection_available():
         rows = [{"message": "Preview unavailable in this environment"}]
-        return PreviewOut(rows=rows[:limit], row_count=len(rows))
+        response = PreviewOut(rows=rows[:limit], row_count=len(rows))
+        _log_api_event("preview.response", response)
+        return response
 
     declares = []
-    values: list[Any] = []
+    values: List[Any] = []
     for key, value in payload.params.items():
         declares.append(f"DECLARE {key} NVARCHAR(4000) = ?;")
         values.append(value)
@@ -111,19 +175,22 @@ def preview(payload: PreviewIn) -> PreviewOut:
     sql_text = "\n".join(declares + [limited_sql])
 
     try:
-        with contextlib.closing(pyodbc.connect(settings.sql_conn_str, timeout=5)) as conn:
+        with contextlib.closing(open_sql_connection()) as conn:
             cursor = conn.cursor()
             cursor.execute(sql_text, values)
             columns = [col[0] for col in cursor.description]
             rows = [dict(zip(columns, row)) for row in cursor.fetchmany(limit)]
-    except pyodbc.Error as exc:  # pragma: no cover - DB specific
+    except Exception as exc:  # pragma: no cover - DB specific
         logger.exception("preview execution failed")
         raise ServiceError("Preview query failed", "preview_error", status_code=502) from exc
-    return PreviewOut(rows=rows, row_count=len(rows))
+    response = PreviewOut(rows=rows, row_count=len(rows))
+    _log_api_event("preview.response", response)
+    return response
 
 
 @router.post("/publishReport", response_model=PublishOut)
 def publish_report(payload: PublishIn) -> PublishOut:
+    _log_api_event("publishReport.request", payload)
     dataset_name = payload.report.title.replace(" ", "") or "Dataset"
     sql_text = _build_publish_sql(payload.columns, payload.filters, payload.sort)
     rdl_bytes = build_rdl(
@@ -151,19 +218,21 @@ def publish_report(payload: PublishIn) -> PublishOut:
     render_url = make_render_url(upload_result["path"], {param.name: str(param.default or "") for param in payload.parameters})
     server_info = get_system_info() or {"status": "unknown"}
 
-    return PublishOut(
+    response = PublishOut(
         path=upload_result["path"],
         render_url_pdf=render_url,
         server=server_info,
         dataset_fields=[field.model_dump() for field in payload.columns],
         echo=payload.model_dump(),
     )
+    _log_api_event("publishReport.response", response)
+    return response
 
 
 def _build_publish_sql(
-    columns: list[ColumnDef],
-    filters: list[FilterDef],
-    sort: list[SortDef] | None,
+    columns: List[ColumnDef],
+    filters: List[FilterDef],
+    sort: Optional[List[SortDef]],
 ) -> str:
     if not columns:
         return "SELECT 1 AS Placeholder"
@@ -189,3 +258,36 @@ def _build_publish_sql(
         sql_lines.append("ORDER BY " + ", ".join(order_fragments))
 
     return "\n".join(sql_lines)
+
+
+def _log_api_event(action: str, payload: Optional[Any]) -> None:
+    try:
+        serialized = _serialize_payload(payload)
+    except Exception as exc:  # pragma: no cover - logging safeguard
+        logger.warning("failed to serialize payload for %s: %s", action, exc)
+        serialized = "unserializable payload"
+    logger.info("api_call", extra={"action": action, "payload": serialized})
+
+
+def _serialize_payload(payload: Optional[Any]) -> Any:
+    if payload is None:
+        return None
+    if hasattr(payload, "model_dump"):
+        data = payload.model_dump()
+    elif isinstance(payload, (dict, list, str, int, float, bool)):
+        data = payload
+    else:
+        data = str(payload)
+    encoded = jsonable_encoder(data)
+    serialized = json.dumps(encoded, default=str)
+    if len(serialized) > 2000:
+        serialized = serialized[:2000] + "...<truncated>"
+    return serialized
+
+
+def _summarize_error(exc: Exception) -> str:
+    """Return a short, user-friendly error summary."""
+    detail = str(exc).strip()
+    if not detail:
+        return ""
+    return detail.splitlines()[0][:200]

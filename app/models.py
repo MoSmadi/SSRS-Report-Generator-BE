@@ -2,33 +2,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Dict, Iterable, List, Optional
 
 
-@dataclass(slots=True)
+@dataclass
 class QueryParameter:
     """Represents a SQL parameter definition used for SSRS datasets."""
 
     name: str
     type: str
-    default: Any | None = None
+    default: Optional[Any] = None
 
 
-@dataclass(slots=True)
+@dataclass
 class DatasetField:
     """Normalized dataset field metadata consumed by RDL builder."""
 
     name: str
     rdl_type: str
     display_name: str
-    description: str | None = None
+    description: Optional[str] = None
 
 
-@dataclass(slots=True)
+@dataclass
 class PaginatedRows:
     """Lightweight holder for preview data."""
 
-    rows: list[dict[str, Any]]
+    rows: List[Dict[str, Any]]
     total: int
 
     @classmethod
@@ -48,4 +48,4 @@ class ServiceError(Exception):
 
 
 def format_error(message: str, code: str) -> dict[str, dict[str, str]]:
-    return {\"error\": {\"message\": message, \"code\": code}}
+    return {"error": {"message": message, "code": code}}

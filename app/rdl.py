@@ -1,7 +1,7 @@
 """RDL document builder using Jinja2 templates."""
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Optional
 
 from jinja2 import Template
 
@@ -151,7 +151,7 @@ def build_rdl(
     sql_text: str,
     parameters: Iterable[ParamDef],
     fields: Iterable[ColumnDef],
-    chart: ChartSpec | None,
+    chart: Optional[ChartSpec],
 ) -> bytes:
     rendered = _RDL_TEMPLATE.render(
         namespace=namespace,

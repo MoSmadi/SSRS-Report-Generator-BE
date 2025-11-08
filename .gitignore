@@ -1,0 +1,7 @@
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+.DS_Store
+SSRS-Report-Generator-BE-mirror/
+.env

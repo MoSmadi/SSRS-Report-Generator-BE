@@ -1,0 +1,213 @@
+{
+  "info": {
+    "name": "ReportBuilder Backend",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "GET /report/customerDatabases",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{API_BASE}}/report/customerDatabases",
+          "host": ["{{API_BASE}}"],
+          "path": ["report", "customerDatabases"]
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+              "const data = pm.response.json();",
+              "if (Array.isArray(data.databases) && data.databases.length) {",
+              "  pm.collectionVariables.set('DB', data.databases[0].name);",
+              "}",
+              "pm.collectionVariables.set('CUSTOMER_DATABASES', JSON.stringify(data.databases || []));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /report/inferFromNaturalLanguage",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"db\": \"{{DB}}\",\n  \"title\": \"{{TITLE}}\",\n  \"text\": \"{{TEXT}}\"\n}"
+        },
+        "url": {
+          "raw": "{{API_BASE}}/report/inferFromNaturalLanguage",
+          "host": ["{{API_BASE}}"],
+          "path": ["report", "inferFromNaturalLanguage"]
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+              "const data = pm.response.json();",
+              "pm.collectionVariables.set('SPEC', JSON.stringify(data.spec || {}));",
+              "pm.collectionVariables.set('SUGGESTED_MAPPING', JSON.stringify(data.suggestedMapping || []));",
+              "pm.collectionVariables.set('AVAILABLE_COLUMNS', JSON.stringify(data.availableColumns || []));",
+              "const mapping = [];",
+              "(data.suggestedMapping || []).forEach(function(item){",
+              "  if (item && item.column) { mapping.push(item); }",
+              "});",
+              "if (!mapping.length) {",
+              "  (data.availableColumns || []).slice(0, 3).forEach(function(col){",
+              "    if (col && col.name) { mapping.push({ term: col.name, column: col.name, role: 'dimension' }); }",
+              "  });",
+              "}",
+              "pm.collectionVariables.set('MAPPING', JSON.stringify(mapping));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /report/generateSQL",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"db\": \"{{DB}}\",\n  \"mapping\": {{MAPPING}},\n  \"spec\": {{SPEC}}\n}"
+        },
+        "url": {
+          "raw": "{{API_BASE}}/report/generateSQL",
+          "host": ["{{API_BASE}}"],
+          "path": ["report", "generateSQL"]
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+              "const data = pm.response.json();",
+              "pm.collectionVariables.set('SQL', data.sql || '');",
+              "pm.collectionVariables.set('PARAMS', JSON.stringify(data.params || []));",
+              "pm.collectionVariables.set('COLUMNS', JSON.stringify(data.columns || []));",
+              "const dict = {};",
+              "(data.params || []).forEach(function(p){ if (p && p.name) { dict[p.name] = p.value || ''; } });",
+              "pm.collectionVariables.set('PARAMS_DICT', JSON.stringify(dict));",
+              "const parameters = (data.params || []).map(function(p){ return { name: (p.name || '').replace(/^@/, ''), rdlType: p.rdlType || 'String', default: p.value || '' }; });",
+              "pm.collectionVariables.set('PARAMETERS', JSON.stringify(parameters));",
+              "const cols = data.columns || [];",
+              "const filters = [];",
+              "if (parameters.length && cols.length) { filters.push({ field: cols[0].source || cols[0].name, op: '=', param: parameters[0].name }); }",
+              "pm.collectionVariables.set('FILTERS', JSON.stringify(filters));",
+              "const sort = cols.length ? [{ field: cols[0].name, dir: 'asc' }] : [];",
+              "pm.collectionVariables.set('SORT', JSON.stringify(sort));",
+              "let chart = null;",
+              "const timeCol = cols.find(function(c){ return c.role === 'time'; });",
+              "const measureCol = cols.find(function(c){ return c.role === 'measure'; });",
+              "if (timeCol && measureCol) { chart = { type: 'line', category: timeCol.name, series: [measureCol.name], values: [measureCol.name] }; }",
+              "pm.collectionVariables.set('CHART', JSON.stringify(chart));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /report/preview",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"db\": \"{{DB}}\",\n  \"sql\": \"{{SQL}}\",\n  \"params\": {{PARAMS_DICT}},\n  \"limit\": {{LIMIT}}\n}"
+        },
+        "url": {
+          "raw": "{{API_BASE}}/report/preview",
+          "host": ["{{API_BASE}}"],
+          "path": ["report", "preview"]
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+              "const data = pm.response.json();",
+              "pm.collectionVariables.set('PREVIEW_ROWS', JSON.stringify(data.rows || []));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "POST /report/publishReport",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"db\": { \"name\": \"{{DB}}\" },\n  \"report\": {\n    \"title\": \"{{TITLE}}\",\n    \"folder\": \"{{FOLDER}}\",\n    \"shared_data_source_path\": \"{{SHARED_DS_PATH}}\"\n  },\n  \"mapping\": {{MAPPING}},\n  \"columns\": {{COLUMNS}},\n  \"parameters\": {{PARAMETERS}},\n  \"filters\": {{FILTERS}},\n  \"sort\": {{SORT}},\n  \"chart\": {{CHART}}\n}"
+        },
+        "url": {
+          "raw": "{{API_BASE}}/report/publishReport",
+          "host": ["{{API_BASE}}"],
+          "path": ["report", "publishReport"]
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const status = pm.response.code;",
+              "let message = '';",
+              "try {",
+              "  const data = pm.response.json();",
+              "  message = data.render_url_pdf || (data.error && data.error.message) || '';",
+              "  if (status === 200) { console.log('Render URL:', message); }",
+              "} catch (err) {",
+              "  message = pm.response.text();",
+              "}",
+              "if (status === 200) {",
+              "  pm.test('Publish succeeded', function () { pm.response.to.have.status(200); });",
+              "} else if (message && message.toLowerCase().includes('ssrs')) {",
+              "  console.warn('SSRS unavailable:', message);",
+              "} else {",
+              "  pm.test('Publish failed', function () { pm.response.to.have.status(200); });",
+              "}",
+              "pm.collectionVariables.set('PUBLISH_STATUS', status);",
+              "pm.collectionVariables.set('PUBLISH_MESSAGE', message);"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "API_BASE", "value": "http://localhost:8000" },
+    { "key": "TITLE", "value": "Sales by Month and Region 2024" },
+    { "key": "TEXT", "value": "total sales by month and region for 2024, line chart, filter region in (West, South)" },
+    { "key": "FOLDER", "value": "/AutoReports" },
+    { "key": "SHARED_DS_PATH", "value": "/_Shared/MainDS" },
+    { "key": "LIMIT", "value": "10" }
+  ]
+}

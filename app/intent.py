@@ -1,118 +1,146 @@
 """Natural language intent parsing utilities."""
 from __future__ import annotations
 
+import json
+import logging
 import re
-from typing import Any
+from typing import Any, Dict, List
 
-import requests
+from .azure_openai import chat_completion, is_configured
+from .schemas import ChartIntent, IntentFilter, NLSpec
 
-from . import catalog
-from .config import get_settings
-from .schemas import InferOut, Mapping
+logger = logging.getLogger(__name__)
+SYSTEM_PROMPT = (
+    "You convert a business reporting request into a structured spec. "
+    "Return ONLY minified JSON matching the provided schema. Do not add prose."
+)
 
 
-def parse_intent(text: str) -> dict:
-    """Return a deterministic spec extracted from the NL request."""
+def parse_intent(text: str, title: str) -> NLSpec:
+    """Return an NLSpec using AOAI when available, rules otherwise."""
+    title = title.strip() or "Untitled Report"
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        return parse_intent_rules(cleaned_text, title)
+
+    if is_configured():
+        try:
+            spec = parse_intent_llm(cleaned_text, title)
+            if spec:
+                return spec
+        except Exception as exc:  # pragma: no cover - depends on network
+            logger.warning("AOAI intent parsing failed: %s", exc)
+    return parse_intent_rules(cleaned_text, title)
+
+
+def parse_intent_llm(text: str, title: str) -> NLSpec:
+    """Use Azure OpenAI to extract a reporting spec."""
+    schema_description = json.dumps(
+        {
+            "title": "string",
+            "metrics": ["string"],
+            "dimensions": ["string"],
+            "filters": [{"field": "string", "operator": "string", "value": "string"}],
+            "grain": "day|week|month|quarter|year|none",
+            "chart": {"type": "table|line|bar|pie", "x": "string", "y": "string", "series": ["string"]},
+        }
+    )
+    user_prompt = (
+        f"TITLE: {title}\n"
+        f"TEXT: {text}\n"
+        f"JSON_SCHEMA: {schema_description}\n"
+        "Return valid JSON."
+    )
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    response = chat_completion(messages, response_format={"type": "json_object"})
+    spec = NLSpec.model_validate_json(response)
+    if not spec.title:
+        spec.title = title
+    return spec
+
+
+def parse_intent_rules(text: str, title: str) -> NLSpec:
+    """Deterministic fallback intent parsing."""
     lowered = text.lower()
-    metrics = []
-    for token in ("revenue", "sales", "count", "orders", "profit"):
-        if token in lowered:
-            metrics.append(token)
+    metrics = _extract_tokens(lowered, ["revenue", "sales", "amount", "profit", "count", "orders"])
     if not metrics:
         metrics.append("count")
 
-    dims = []
-    for token in ("region", "country", "product", "category", "channel"):
-        if token in lowered:
-            dims.append(token)
+    dimensions = _extract_tokens(lowered, ["region", "country", "product", "category", "channel", "segment", "customer"])
+    grain = _detect_grain(lowered)
 
-    grain = None
-    for candidate in ("day", "week", "month", "quarter", "year"):
-        if re.search(rf"per {candidate}|by {candidate}", lowered):
-            grain = candidate
-            break
-
-    filters = []
-    date_matches = re.findall(r"(\d{4}-\d{2}-\d{2})", text)
+    filters: List[IntentFilter] = []
+    date_matches = re.findall(r"(20\d{2}-\d{2}-\d{2})", text)
     if len(date_matches) >= 2:
-        filters.append({"field": "OrderDate", "op": ">=", "value": date_matches[0]})
-        filters.append({"field": "OrderDate", "op": "<=", "value": date_matches[1]})
+        filters.append(IntentFilter(field="date", operator=">=", value=date_matches[0]))
+        filters.append(IntentFilter(field="date", operator="<=", value=date_matches[1]))
+
+    last_n_match = re.search(r"last (\d{1,2}) (day|week|month|quarter|year)s?", lowered)
+    if last_n_match:
+        unit = last_n_match.group(2)
+        filters.append(IntentFilter(field="date", operator=">=", value=f"last_{unit}_{last_n_match.group(1)}"))
 
     region_match = re.search(r"in ([A-Za-z ]+)", text)
     if region_match:
         filters.append(
-            {
-                "field": "Region",
-                "op": "=",
-                "value": region_match.group(1).strip().title(),
-            }
+            IntentFilter(field="region", operator="in", value=",".join(tok.strip() for tok in region_match.group(1).split(" and ")))
         )
 
     chart = None
-    if "trend" in lowered or (grain in {"month", "quarter", "year"} and metrics):
-        chart = {"type": "line", "values": metrics, "category": grain or "OrderDate"}
+    if "trend" in lowered or grain in {"month", "quarter", "year"}:
+        chart = ChartIntent(type="line", x=grain or "date", y=metrics[0], series=["region"] if "region" in dimensions else None)
 
-    return {
-        "title": text.strip()[:80],
-        "metrics": metrics,
-        "dimensions": dims,
-        "grain": grain,
-        "filters": filters,
-        "chart": chart,
-        "sort": [{"field": metrics[0], "dir": "desc"}],
+    return NLSpec(
+        title=title,
+        metrics=metrics,
+        dimensions=dimensions,
+        filters=filters,
+        grain=grain or "none",
+        chart=chart,
+    )
+
+
+def spec_to_payload(spec: NLSpec) -> Dict[str, Any]:
+    """Convert NLSpec to the API-facing spec dictionary."""
+    filters_payload: List[Dict[str, str]] = []
+    for flt in spec.filters:
+        filters_payload.append(
+            {
+                "field": flt.field,
+                "operator": flt.operator,
+                "op": flt.operator,
+                "value": flt.value,
+            }
+        )
+    payload: Dict[str, any] = {
+        "title": spec.title,
+        "metrics": spec.metrics,
+        "dimensions": spec.dimensions,
+        "filters": filters_payload,
+        "grain": None if spec.grain == "none" else spec.grain,
     }
+    if spec.chart:
+        payload["chart"] = spec.chart.model_dump(exclude_none=True)
+    if spec.grain and spec.grain != "none":
+        payload.setdefault("sort", [{"field": spec.grain, "dir": "asc"}])
+    elif spec.metrics:
+        payload.setdefault("sort", [{"field": spec.metrics[0], "dir": "desc"}])
+    return payload
 
 
-def _call_azure_openai(prompt: str) -> str:
-    settings = get_settings()
-    if not (settings.azure_openai_endpoint and settings.azure_openai_api_key and settings.azure_openai_deployment):
-        return ""
-
-    url = f"{settings.azure_openai_endpoint}openai/deployments/{settings.azure_openai_deployment}/chat/completions?api-version=2023-12-01-preview"
-    headers = {
-        "api-key": settings.azure_openai_api_key,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messages": [
-            {"role": "system", "content": "You map business terms to columns."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0,
-    }
-    resp = requests.post(url, json=payload, headers=headers, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+def _extract_tokens(text: str, keywords: List[str]) -> List[str]:
+    tokens: List[str] = []
+    for keyword in keywords:
+        if keyword in text:
+            tokens.append(keyword)
+    return tokens
 
 
-def _heuristic_mapping(columns: list[dict], spec: dict) -> list[Mapping]:
-    results: list[Mapping] = []
-    for term in spec["metrics"] + spec["dimensions"]:
-        match = next((col for col in columns if term.lower() in col["name"].lower()), None)
-        if match:
-            results.append(
-                Mapping(
-                    term=term,
-                    column=match["name"],
-                    role="measure" if term in spec["metrics"] else "dimension",
-                )
-            )
-    return results
-
-
-def infer_from_nl(db: str, title: str, text: str) -> InferOut:
-    settings = get_settings()
-    spec = parse_intent(text)
-    spec["title"] = title or spec["title"]
-    available_columns = catalog.list_columns(db)
-    suggested = _heuristic_mapping(available_columns, spec)
-    notes = ""
-    if settings.azure_openai_api_key:
-        try:
-            notes = _call_azure_openai(
-                f"Suggest mappings for: {text}. Columns: {[c['name'] for c in available_columns]}"
-            )
-        except requests.RequestException as exc:  # pragma: no cover - network only
-            notes = f"Azure OpenAI call failed: {exc}"[:200]
-    return InferOut(spec=spec, suggestedMapping=suggested, availableColumns=available_columns, notes=notes or None)
+def _detect_grain(text: str) -> str:
+    for candidate in ("day", "week", "month", "quarter", "year"):
+        if re.search(rf"(per|by) {candidate}", text):
+            return candidate
+    return "month" if "monthly" in text else "none"

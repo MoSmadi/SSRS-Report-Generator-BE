@@ -7,8 +7,9 @@ requests
 requests-ntlm
 pyodbc
 zeep
+rapidfuzz
 python-dotenv
 pytest
-httpx
+httpx>=0.24,<0.28
 pytest-asyncio
 structlog

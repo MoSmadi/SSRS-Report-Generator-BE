@@ -7,6 +7,7 @@ import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .models import ServiceError, format_error
@@ -18,6 +19,14 @@ configure_logging(settings.log_level)
 logger = logging.getLogger("app")
 
 app = FastAPI(title="NL to SSRS Backend", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.exception_handler(ServiceError)
