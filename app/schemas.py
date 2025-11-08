@@ -130,8 +130,8 @@ class GenSQLOut(BaseModel):
 class PreviewIn(BaseModel):
     db: str
     sql: str
-    params: Dict[str, Any]
-    limit: int = 20
+    params: Dict[str, Any] = Field(default_factory=dict)
+    limit: int = 100
 
 
 class PreviewOut(BaseModel):

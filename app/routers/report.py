@@ -157,7 +157,8 @@ def generate_sql(payload: GenSQLIn) -> GenSQLOut:
 @router.post("/preview", response_model=PreviewOut)
 def preview(payload: PreviewIn) -> PreviewOut:
     _log_api_event("preview.request", payload)
-    limit = max(1, min(payload.limit, 200))
+    limit = payload.limit or 100
+    limit = max(1, min(limit, 500))
     rows: List[Dict[str, Any]]
     if not sql_connection_available():
         rows = [{"message": "Preview unavailable in this environment"}]
@@ -165,24 +166,31 @@ def preview(payload: PreviewIn) -> PreviewOut:
         _log_api_event("preview.response", response)
         return response
 
-    declares = []
+    params = payload.params or {}
+    declares: List[str] = []
     values: List[Any] = []
-    for key, value in payload.params.items():
-        declares.append(f"DECLARE {key} NVARCHAR(4000) = ?;")
+    for key, value in params.items():
+        param_name = key if key.startswith("@") else f"@{key}"
+        declares.append(f"DECLARE {param_name} NVARCHAR(4000) = ?;")
         values.append(value)
 
-    limited_sql = f"SELECT TOP {limit} * FROM (\n{payload.sql}\n) AS src"
+    base_sql, _ = _split_order_by_clause(payload.sql)
+    limited_sql = f"SELECT TOP {limit} * FROM (\n{base_sql}\n) AS src"
     sql_text = "\n".join(declares + [limited_sql])
 
     try:
-        with contextlib.closing(open_sql_connection()) as conn:
+        with contextlib.closing(open_sql_connection(payload.db)) as conn:
             cursor = conn.cursor()
             cursor.execute(sql_text, values)
             columns = [col[0] for col in cursor.description]
             rows = [dict(zip(columns, row)) for row in cursor.fetchmany(limit)]
     except Exception as exc:  # pragma: no cover - DB specific
-        logger.exception("preview execution failed")
-        raise ServiceError("Preview query failed", "preview_error", status_code=502) from exc
+        logger.exception("preview execution failed", extra={"db": payload.db})
+        detail = _summarize_error(exc)
+        message = "Preview query failed"
+        if detail:
+            message = f"{message}: {detail}"
+        raise ServiceError(message, "preview_error", status_code=400) from exc
     response = PreviewOut(rows=rows, row_count=len(rows))
     _log_api_event("preview.response", response)
     return response
@@ -283,6 +291,67 @@ def _serialize_payload(payload: Optional[Any]) -> Any:
     if len(serialized) > 2000:
         serialized = serialized[:2000] + "...<truncated>"
     return serialized
+
+
+def _split_order_by_clause(sql: str) -> tuple[str, Optional[str]]:
+    """Split off a top-level ORDER BY clause so we can wrap SQL in a derived table."""
+    lower = sql.lower()
+    depth = 0
+    in_single = False
+    in_double = False
+    in_line_comment = False
+    in_block_comment = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < len(sql) else ""
+
+        if in_line_comment:
+            if ch in "\r\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if ch == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "-" and nxt == "-":
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            i += 1
+            continue
+        if in_single or in_double:
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            depth = max(depth - 1, 0)
+            i += 1
+            continue
+        if depth == 0 and lower.startswith("order by", i):
+            clause = sql[i + len("order by") :].strip()
+            body = sql[:i].rstrip()
+            return body, clause
+        i += 1
+    return sql, None
 
 
 def _summarize_error(exc: Exception) -> str:
