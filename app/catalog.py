@@ -54,32 +54,7 @@ def list_columns(db: str) -> List[ColumnMetadata]:
     return columns
 
 
-def validate_shape(sql_text: str) -> list[dict[str, Any]]:
-    if not sql_connection_available():
-        return [
-            {"name": "OrderDate", "system_type_name": "datetime", "rdlType": "DateTime"},
-            {"name": "Region", "system_type_name": "nvarchar", "rdlType": "String"},
-            {"name": "SalesAmount", "system_type_name": "money", "rdlType": "Float"},
-        ]
-    query = "EXEC sp_describe_first_result_set @tsql = ?"
-    with contextlib.closing(_conn()) as conn:
-        cursor = conn.cursor()
-        cursor.execute(query, sql_text)
-        rows = cursor.fetchall()
-    columns = []
-    for row in rows:
-        name = _get_tuple_value(row, 2)  # column name
-        if not name:
-            continue
-        system_type = _get_tuple_value(row, 5)  # system_type_name
-        columns.append(
-            {
-                "name": name,
-                "system_type_name": system_type,
-                "rdlType": map_sql_type_to_rdl(system_type),
-            }
-        )
-    return columns
+
 
 
 def sample_values(db: str, column: str, limit: int = 5) -> list[str]:

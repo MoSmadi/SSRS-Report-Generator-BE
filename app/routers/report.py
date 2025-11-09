@@ -4,12 +4,12 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
 from fastapi.encoders import jsonable_encoder
 
-from .. import catalog, sqlgen
+from .. import azure_openai, catalog, sqlgen
 from ..config import get_settings
 from ..intent import parse_intent, spec_to_payload
 from ..mapping import compute_schema_insights, map_terms
@@ -27,6 +27,7 @@ from ..schemas import (
     PreviewOut,
     PublishIn,
     PublishOut,
+    Mapping,
     SortDef,
 )
 from ..smoketest import make_render_url
@@ -107,49 +108,10 @@ def generate_sql(payload: GenSQLIn) -> GenSQLOut:
     valid_mapping = [m for m in payload.mapping if m.column]
     if not valid_mapping:
         raise ServiceError("At least one mapped column is required", "invalid_mapping", status_code=400)
-
-    sql_text, params = sqlgen.build_sql(payload.spec, valid_mapping)
-    logger.debug("generateSQL.sql", extra={"sql": sql_text, "db": payload.db})
-    try:
-        columns_meta = catalog.validate_shape(sql_text)
-    except Exception as exc:  # pragma: no cover - DB only
-        logger.exception(
-            "failed to validate SQL shape",
-            extra={"sql": sql_text, "db": payload.db, "spec": payload.spec, "mapping": mapping_payload},
-        )
-        detail = _summarize_error(exc)
-        message = "Unable to validate SQL output"
-        if detail:
-            message = f"{message}: {detail}"
-        raise ServiceError(message, "catalog_error", status_code=502) from exc
-
-    column_defs: List[ColumnDef] = []
-    for meta in columns_meta:
-        samples = None
-        with contextlib.suppress(Exception):
-            if "." in meta["name"]:
-                samples = catalog.sample_values(payload.db, meta["name"])
-        rdl_type = meta.get("rdlType", "String")
-        if rdl_type == "Float":
-            role = "measure"
-        elif rdl_type == "DateTime":
-            role = "time"
-        else:
-            role = "dimension"
-        column_defs.append(
-            ColumnDef(
-                name=meta["name"],
-                source=meta.get("source", meta["name"]),
-                system_type_name=meta.get("system_type_name"),
-                rdlType=rdl_type,
-                role=role,
-                display_name=meta["name"],
-                samples=samples,
-                null_pct=None,
-            )
-        )
-
-    response = GenSQLOut(sql=sql_text, params=params, columns=column_defs)
+    
+    sql_text, params = _build_sql_with_azure(payload.spec, valid_mapping, payload.db)
+    logger.debug("generateSQL.llm", extra={"db": payload.db, "sql": sql_text})
+    response = GenSQLOut(sql=sql_text, params=params)
     _log_api_event("generateSQL.response", response)
     return response
 
@@ -360,3 +322,76 @@ def _summarize_error(exc: Exception) -> str:
     if not detail:
         return ""
     return detail.splitlines()[0][:200]
+
+
+def _build_sql_with_azure(spec: Dict[str, Any], mapping: List[Mapping], db: str) -> Tuple[str, List[Dict[str, Any]]]:
+    if not azure_openai.is_configured():
+        raise RuntimeError("Azure OpenAI is not configured")
+    mapping_data = [
+        {k: v for k, v in item.model_dump().items() if v is not None}
+        for item in mapping
+    ]
+    user_payload = {
+        "database": db,
+        "spec": spec,
+        "mapping": mapping_data,
+        "rules": {
+            "dialect": "SQL Server",
+            "aggregate_measures": True,
+            "group_dimensions": True,
+        },
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You generate SQL Server SELECT statements for SSRS datasets. "
+                "Only reference columns provided in the mapping. "
+                "Always return JSON with keys 'sql' and 'params'. "
+                "If no measures are supplied, use COUNT(1) AS RowCount. "
+                "Parameters must include JSON objects with fields name, rdlType, and optionally value."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(user_payload, indent=2),
+        },
+    ]
+    content = azure_openai.chat_completion(messages, response_format={"type": "json_object"})
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as exc:  # pragma: no cover - depends on remote service
+        raise RuntimeError(f"Invalid JSON from Azure OpenAI: {exc}") from exc
+    sql_text = data.get("sql")
+    if not sql_text:
+        raise RuntimeError("Azure OpenAI response did not include SQL text")
+    params = _normalize_llm_params(data.get("params"))
+    return sql_text.strip(), params
+
+
+def _normalize_llm_params(raw_params: Any) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(raw_params, list):
+        return normalized
+    for param in raw_params:
+        if not isinstance(param, dict):
+            continue
+        name: Optional[str] = param.get("name") or param.get("param")
+        if not name:
+            continue
+        clean_name = name if name.startswith("@") else f"@{name.lstrip('@')}"
+        rdl_type = param.get("rdlType") or _infer_param_type(param.get("field") or clean_name)
+        entry: Dict[str, Any] = {"name": clean_name, "rdlType": rdl_type}
+        if "value" in param:
+            entry["value"] = param["value"]
+        normalized.append(entry)
+    return normalized
+
+
+def _infer_param_type(field_name: str) -> str:
+    lowered = field_name.lower()
+    if "date" in lowered or "time" in lowered:
+        return "DateTime"
+    if any(token in lowered for token in ("amount", "qty", "count", "total")):
+        return "Float"
+    return "String"

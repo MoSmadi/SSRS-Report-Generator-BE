@@ -124,7 +124,6 @@ class GenSQLIn(BaseModel):
 class GenSQLOut(BaseModel):
     sql: str
     params: List[Dict[str, Any]]
-    columns: List[ColumnDef]
 
 
 class PreviewIn(BaseModel):
