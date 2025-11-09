@@ -40,83 +40,165 @@ settings = get_settings()
 
 router = APIRouter(prefix="/report", tags=["reports"])
 
-STATIC_NLP_TRIGGER = "static sales summary"
-STATIC_PRESET_ID = "static-sales-summary-v1"
+STATIC_NLP_TRIGGER = "Returns summed Quantity1/2/3 per item and inventory count (non-deleted, approved counts after 2025‑10‑04)"
+STATIC_PRESET_ID = "static-summed-Quantity-v1"
 _STATIC_INFER_RESPONSE: Dict[str, Any] = {
     "spec": {
-        "title": "Static Sales Summary",
-        "metrics": ["SalesAmount"],
-        "dimensions": ["Region"],
-        "filters": [],
+        "title": "Static Inventory Count Summary",
+        "metrics": ["Quantity1", "Quantity2", "Quantity3"],
+        "dimensions": ["ItemId", "InventoryCountId", "Date"],
+        "filters": [
+            {"field": "ic.Date", "operator": ">", "value": "2025-10-04"},
+            {"field": "ic.Status", "operator": "=", "value": "Approved"},
+        ],
         "grain": "none",
-        "chart": {"type": "bar", "x": "Region", "y": "SalesAmount"},
+        "chart": {"type": "bar", "x": "ItemId", "y": "Quantity1"},
         "_staticPresetId": STATIC_PRESET_ID,
     },
     "suggestedMapping": [
         {
-            "term": "SalesAmount",
+            "term": "Quantity1",
             "role": "metric",
-            "column": "[dbo].[FactSales].[SalesAmount]",
+            "column": "[dbo].[InventoryCountDetail].[Quantity1]",
             "confidence": 1.0,
             "reason": "Static preset mapping",
+            "grain": None,
         },
         {
-            "term": "Region",
-            "role": "dimension",
-            "column": "[dbo].[FactSales].[Region]",
+            "term": "Quantity2",
+            "role": "metric",
+            "column": "[dbo].[InventoryCountDetail].[Quantity2]",
             "confidence": 1.0,
             "reason": "Static preset mapping",
+            "grain": None,
+        },
+        {
+            "term": "Quantity3",
+            "role": "metric",
+            "column": "[dbo].[InventoryCountDetail].[Quantity3]",
+            "confidence": 1.0,
+            "reason": "Static preset mapping",
+            "grain": None,
+        },
+        {
+            "term": "ItemId",
+            "role": "dimension",
+            "column": "[dbo].[InventoryCountDetail].[ItemId]",
+            "confidence": 1.0,
+            "reason": "Static preset mapping",
+            "grain": None,
+        },
+        {
+            "term": "InventoryCountId",
+            "role": "dimension",
+            "column": "[dbo].[InventoryCount].[Id]",
+            "confidence": 1.0,
+            "reason": "Static preset mapping",
+            "grain": None,
+        },
+        {
+            "term": "Date",
+            "role": "dimension",
+            "column": "[dbo].[InventoryCount].[Date]",
+            "confidence": 1.0,
+            "reason": "Static preset mapping",
+            "grain": None,
         },
     ],
     "availableColumns": [
         {
             "schema": "dbo",
-            "table": "FactSales",
-            "column": "OrderDate",
+            "table": "InventoryCountDetail",
+            "column": "ItemId",
+            "dataType": "int",
+            "isNumeric": True,
+            "isDateLike": False,
+            "sampleValues": ["1001", "1002"],
+            "name": "dbo.InventoryCountDetail.ItemId",
+            "bracketedName": "[dbo].[InventoryCountDetail].[ItemId]",
+        },
+        {
+            "schema": "dbo",
+            "table": "InventoryCountDetail",
+            "column": "Quantity1",
+            "dataType": "int",
+            "isNumeric": True,
+            "isDateLike": False,
+            "sampleValues": ["5", "12"],
+            "name": "dbo.InventoryCountDetail.Quantity1",
+            "bracketedName": "[dbo].[InventoryCountDetail].[Quantity1]",
+        },
+        {
+            "schema": "dbo",
+            "table": "InventoryCountDetail",
+            "column": "Quantity2",
+            "dataType": "int",
+            "isNumeric": True,
+            "isDateLike": False,
+            "sampleValues": ["3", "7"],
+            "name": "dbo.InventoryCountDetail.Quantity2",
+            "bracketedName": "[dbo].[InventoryCountDetail].[Quantity2]",
+        },
+        {
+            "schema": "dbo",
+            "table": "InventoryCountDetail",
+            "column": "Quantity3",
+            "dataType": "int",
+            "isNumeric": True,
+            "isDateLike": False,
+            "sampleValues": ["1", "4"],
+            "name": "dbo.InventoryCountDetail.Quantity3",
+            "bracketedName": "[dbo].[InventoryCountDetail].[Quantity3]",
+        },
+        {
+            "schema": "dbo",
+            "table": "InventoryCount",
+            "column": "Id",
+            "dataType": "int",
+            "isNumeric": True,
+            "isDateLike": False,
+            "sampleValues": ["500", "501"],
+            "name": "dbo.InventoryCount.Id",
+            "bracketedName": "[dbo].[InventoryCount].[Id]",
+        },
+        {
+            "schema": "dbo",
+            "table": "InventoryCount",
+            "column": "Date",
             "dataType": "datetime",
             "isNumeric": False,
             "isDateLike": True,
-            "sampleValues": ["2024-01-01", "2024-01-02"],
-            "name": "dbo.FactSales.OrderDate",
-            "bracketedName": "[dbo].[FactSales].[OrderDate]",
-        },
-        {
-            "schema": "dbo",
-            "table": "FactSales",
-            "column": "Region",
-            "dataType": "nvarchar",
-            "isNumeric": False,
-            "isDateLike": False,
-            "sampleValues": ["West", "South"],
-            "name": "dbo.FactSales.Region",
-            "bracketedName": "[dbo].[FactSales].[Region]",
-        },
-        {
-            "schema": "dbo",
-            "table": "FactSales",
-            "column": "SalesAmount",
-            "dataType": "money",
-            "isNumeric": True,
-            "isDateLike": False,
-            "sampleValues": ["1000", "2500"],
-            "name": "dbo.FactSales.SalesAmount",
-            "bracketedName": "[dbo].[FactSales].[SalesAmount]",
+            "sampleValues": ["2025-10-05", "2025-10-06"],
+            "name": "dbo.InventoryCount.Date",
+            "bracketedName": "[dbo].[InventoryCount].[Date]",
         },
     ],
     "schemaInsights": {
         "coveragePercent": 100,
-        "matchedFields": ["SalesAmount", "Region"],
+        "matchedFields": ["Quantity1", "Quantity2", "Quantity3", "ItemId", "InventoryCountId", "Date"],
         "missingFields": [],
     },
 }
 _STATIC_GENSQL_RESPONSE: Dict[str, Any] = {
-    "sql": (
-        "SELECT\n"
-        "    [dbo].[FactSales].[Region] AS [Region],\n"
-        "    SUM([dbo].[FactSales].[SalesAmount]) AS [SalesAmount]\n"
-        "FROM dbo.FactSales\n"
-        "GROUP BY [dbo].[FactSales].[Region]\n"
-        "ORDER BY [dbo].[FactSales].[Region] ASC"
+    "sql": ("""
+         SELECT 
+            icd.ItemId,
+            SUM(icd.Quantity1) AS Quantity1,
+            SUM(icd.Quantity2) AS Quantity2,
+            SUM(icd.Quantity3) AS Quantity3,
+            ic.Date,
+            ic.Id AS InventoryCountId
+        FROM dbo.InventoryCountDetail icd
+        INNER JOIN dbo.InventoryCountStorageLocation icsl 
+            ON icd.InventoryCountStorageLocationId = icsl.Id
+            AND icsl.IsDeleted = 0
+        INNER JOIN dbo.InventoryCount ic 
+            ON icsl.InventoryCountId = ic.Id
+            AND ic.IsDeleted = 0
+            AND ic.Date > '2025-10-04'
+            AND ic.Status = 3 -- InventoryCountStatus.Approved
+        WHERE icd.IsDeleted = 0
+        GROUP BY icd.ItemId, ic.Date, ic.Id"""
     ),
     "params": [],
 }
