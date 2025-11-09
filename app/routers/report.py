@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -39,6 +40,87 @@ settings = get_settings()
 
 router = APIRouter(prefix="/report", tags=["reports"])
 
+STATIC_NLP_TRIGGER = "static sales summary"
+STATIC_PRESET_ID = "static-sales-summary-v1"
+_STATIC_INFER_RESPONSE: Dict[str, Any] = {
+    "spec": {
+        "title": "Static Sales Summary",
+        "metrics": ["SalesAmount"],
+        "dimensions": ["Region"],
+        "filters": [],
+        "grain": "none",
+        "chart": {"type": "bar", "x": "Region", "y": "SalesAmount"},
+        "_staticPresetId": STATIC_PRESET_ID,
+    },
+    "suggestedMapping": [
+        {
+            "term": "SalesAmount",
+            "role": "metric",
+            "column": "[dbo].[FactSales].[SalesAmount]",
+            "confidence": 1.0,
+            "reason": "Static preset mapping",
+        },
+        {
+            "term": "Region",
+            "role": "dimension",
+            "column": "[dbo].[FactSales].[Region]",
+            "confidence": 1.0,
+            "reason": "Static preset mapping",
+        },
+    ],
+    "availableColumns": [
+        {
+            "schema": "dbo",
+            "table": "FactSales",
+            "column": "OrderDate",
+            "dataType": "datetime",
+            "isNumeric": False,
+            "isDateLike": True,
+            "sampleValues": ["2024-01-01", "2024-01-02"],
+            "name": "dbo.FactSales.OrderDate",
+            "bracketedName": "[dbo].[FactSales].[OrderDate]",
+        },
+        {
+            "schema": "dbo",
+            "table": "FactSales",
+            "column": "Region",
+            "dataType": "nvarchar",
+            "isNumeric": False,
+            "isDateLike": False,
+            "sampleValues": ["West", "South"],
+            "name": "dbo.FactSales.Region",
+            "bracketedName": "[dbo].[FactSales].[Region]",
+        },
+        {
+            "schema": "dbo",
+            "table": "FactSales",
+            "column": "SalesAmount",
+            "dataType": "money",
+            "isNumeric": True,
+            "isDateLike": False,
+            "sampleValues": ["1000", "2500"],
+            "name": "dbo.FactSales.SalesAmount",
+            "bracketedName": "[dbo].[FactSales].[SalesAmount]",
+        },
+    ],
+    "schemaInsights": {
+        "coveragePercent": 100,
+        "matchedFields": ["SalesAmount", "Region"],
+        "missingFields": [],
+    },
+}
+_STATIC_GENSQL_RESPONSE: Dict[str, Any] = {
+    "sql": (
+        "SELECT\n"
+        "    [dbo].[FactSales].[Region] AS [Region],\n"
+        "    SUM([dbo].[FactSales].[SalesAmount]) AS [SalesAmount]\n"
+        "FROM dbo.FactSales\n"
+        "GROUP BY [dbo].[FactSales].[Region]\n"
+        "ORDER BY [dbo].[FactSales].[Region] ASC"
+    ),
+    "params": [],
+}
+
 
 @router.get("/customerDatabases")
 def list_databases() -> Dict[str, List[Dict[str, str]]]:
@@ -64,6 +146,12 @@ def infer_from_nl(payload: Dict[str, Any]) -> Dict[str, Any]:
     title = payload.get("title") or ""
     if not db or not text:
         raise HTTPException(status_code=400, detail="db and text are required")
+
+    if _matches_static_nlp(text):
+        response = _build_static_infer_response()
+        _log_api_event("inferFromNaturalLanguage.response", response)
+        logger.info("infer.static_response", extra={"db": db, "title": title})
+        return response
 
     spec_model = parse_intent(text, title)
     spec_payload = spec_to_payload(spec_model)
@@ -104,6 +192,12 @@ def generate_sql(payload: GenSQLIn) -> GenSQLOut:
             "mapping": mapping_payload,
         },
     )
+
+    if _spec_is_static(payload.spec):
+        response = _build_static_sql_response()
+        _log_api_event("generateSQL.response", response)
+        logger.info("generateSQL.static_response", extra={"db": payload.db})
+        return response
 
     valid_mapping = [m for m in payload.mapping if m.column]
     if not valid_mapping:
@@ -395,3 +489,19 @@ def _infer_param_type(field_name: str) -> str:
     if any(token in lowered for token in ("amount", "qty", "count", "total")):
         return "Float"
     return "String"
+
+
+def _matches_static_nlp(text: str) -> bool:
+    return text.casefold() == STATIC_NLP_TRIGGER.casefold()
+
+
+def _spec_is_static(spec: Dict[str, Any]) -> bool:
+    return isinstance(spec, dict) and spec.get("_staticPresetId") == STATIC_PRESET_ID
+
+
+def _build_static_infer_response() -> Dict[str, Any]:
+    return copy.deepcopy(_STATIC_INFER_RESPONSE)
+
+
+def _build_static_sql_response() -> GenSQLOut:
+    return GenSQLOut(**_STATIC_GENSQL_RESPONSE)
