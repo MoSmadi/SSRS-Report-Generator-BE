@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .models import ServiceError, format_error
 from .routers.report import router as report_router
+from .ssrs_api import router as ssrs_router
 from .utils.logging import bind_request_context, configure_logging
 
 settings = get_settings()
@@ -75,3 +76,4 @@ async def health() -> dict[str, bool]:
 
 
 app.include_router(report_router)
+app.include_router(ssrs_router)
